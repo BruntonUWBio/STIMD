@@ -3,48 +3,83 @@ import numpy as np
 from numpy import pi, cos, sin
 from scipy.optimize import minimize
 from Decompose_MP_periodic_sym import Decompose_MP_periodic_sym
+from sklearn.base import BaseEstimator,TransformerMixin
 
-class STIMD():
+class STIMD(BaseEstimator,TransformerMixin):
+    """
+    This function decomposes the data matrix X into X = B S where
+    S is the STIMD modes and B is the corresponding mixing matrix
+
+    Parameters
+    ----------
+    X : array-like, shape (n_observations, n_samples)
+        Data matrix contiaing obersved (mixed) signals
+    θ_init : array-like, shape (n_modes, n_samples)
+        Initial guess for the phases of the modes 
+    B_init : array-like, shape (n_observations, n_modes)
+        Initial guess for the mixing matrix
+    verbose : boolean, optional
+        Display which mode is being extracted for sanity 
+        purposes
+    tol : float, optional
+        Function tolerance in minimization 
+    disp : bool, optional
+        Display minimization results
 
 
-    # This function decomposes the data matrix X into X = B S where
-    # S is the STIMD modes and B is the corresponding mixing matrix
-    
-    # Input: 
-    # X - observed signals (nobservations x nsamples)
-    # θ_ini - initiall guess for the phases of the modes (nmodes x nsamples)
-    # B_0 - initial guess for the mixing matrix (nobservations x nmodes) 
+    Returns 
+    -------
+    X_new : array-like, shape (n_modes, n_samples)
+        STIMD modes
 
-    # Output:
-    # None (this might change)
-    # self.B - the mixing matrix
-    # self.S - STIMD modes
-    # self.dθ - 
-    # self.ϕi - mixng matrix
-    def transform(self,X,θ_ini,B0,verbose=False,minimization_tol=1e-6):
-        self.nmodes, self.nsamples = θ_ini.shape
-        self.nobservations = X.shape[0]
-        self.S = np.zeros((self.nmodes,self.nsamples))
-        self.B = np.copy(B0)
-        self.dθ = np.zeros((self.nmodes,self.nsamples))
-        self.cons = list()
-        self.ϕi = np.zeros((self.nobservations-1,self.nmodes))
+    Attributes
+    ----------
+    n_modes_ : int
+        number of STIMD modes
+    n_samples_ : int
+        number of time samples
+    n_observations_ : int
+        number of observations
+    S_ : array-like, shape (n_modes, n_samples)
+        STIMD modes
+    B_ : array-like, shape (n_observations, n_modes)
+        Mixing matrix
+    dθ_ : array-like, shape (n_modes, n_samples)
+        Instantanous frequencies of stimd modes dθ/2π = ω
+    """
+    def fit_transform(self,X,θ_init,B_init,verbose=False,tol=1e-6,disp=False):
+        self.n_modes_, self.n_samples_ = θ_init.shape
+        self.n_observations_ = X.shape[0]
+        self.S_ = np.zeros((self.n_modes_,self.n_samples_))
+        self.B_ = np.copy(B_init)
+        self.dθ_ = np.zeros((self.n_modes_,self.n_samples_))
+        
+        self.__cons = list()
+        self.__ϕ = np.zeros((self.n_observations_-1,self.n_modes_))
 
-        for i in range(self.nmodes):
+        for i in range(self.n_modes_):
             if verbose:
                 print('Computing Mode',i)
-            self.B = np.linalg.qr(self.B)[0] # Apply Gramm-Schmidt to B
-            ϕi_guess = self._cartesian2spherical(self.B[:,i]) # Convert to polar coordinates
-            obj =  partial(self._objective,X=X,θ_ini=θ_ini[i,:]) # Construct objective function
-            self.ϕi[:,i] = minimize(obj,ϕi_guess,constraints=self.cons,tol=minimization_tol).x # Perform minimization     
-            self.S[i,:],self.dθ[i,:],self.B[:,i] = self._get_params(self.ϕi[:,i],X,θ_ini[i,:]) # Get S,dθ, and B
-            
+            self.B_ = np.linalg.qr(self.B_)[0] # Apply Gramm-Schmidt to B
+            ϕ_init = self._cartesian2spherical(self.B_[:,i]) # Convert to polar coordinates
+            obj =  partial(self._objective,X=X,θ_init=θ_init[i,:]) # Construct objective function
+            self.__ϕ[:,i] = minimize(obj,ϕ_init,constraints=self.__cons,tol=tol,options={'disp':disp}).x # Perform minimization
+            self.S_[i,:],self.dθ_[i,:],self.B_[:,i] = self._get_params(self.__ϕ[:,i],X,θ_init[i,:]) # Get S,dθ, and B
+
             # Create constraint in preparation for next iteration
-            self.cons.append({'type': 'eq', 'fun': partial(self._constraint,ϕi=self.ϕi[:,i])}) 
-        
+            self.__cons.append({'type': 'eq', 'fun': partial(self._constraint,β=self.__ϕ[:,i])})
+
         # Sort B and S according to specified convention
-        B,S = self.sort_modes(self.B,self.S)
-            
+        self.B_,self._S = self.sort_modes(self.B_,self.S_)
+
+        # Return source signals
+        X_new = self.S_
+
+        return X_new
+
+
+    # If X = B S sorts B and S according to specified convention
+    # Convention: First element in each column must be positive
     def sort_modes(self,B,S):
 
         # Get rid of sign ambiguity
@@ -53,27 +88,31 @@ class STIMD():
                 B[:,i] = -B[:,i]
                 S[i,:] = -S[i,:]
         return B,S
-    
-    def _get_params(self,ϕ,X,θ_ini):
+
+    # project X in direction ϕ and with initial condition θ_init
+    # Compute corresponding IMF (s), instantaneous frequency dθ and and projection vector w
+    def _get_params(self,ϕ,X,θ_init):
         w = self._spherical2cartesian(ϕ)
         signal = w.dot(X)
-        s,_,_,dθ = Decompose_MP_periodic_sym(signal,θ_ini)
+        s,_,_,dθ = Decompose_MP_periodic_sym(signal,θ_init)
         return s,dθ,w
 
-    def _objective(self,ϕ,X,θ_ini):
+    # Objective function which we are trying to minimize
+    def _objective(self,ϕ,X,θ_init):
         w = self._spherical2cartesian(ϕ)
         signal = w.dot(X)
-        IMF = Decompose_MP_periodic_sym(signal,θ_ini)[0]
+        IMF = Decompose_MP_periodic_sym(signal,θ_init)[0]
         obj = np.sum((IMF-signal)**2)
         return obj
-      
-    def _constraint(self,ϕ,ϕi):
-        y = np.inner(self._spherical2cartesian(ϕ),self._spherical2cartesian(ϕi))
+
+    # Constrain used to enforce polar vectors α and β to be orthogonal
+    def _constraint(self,α,β):
+        y = np.inner(self._spherical2cartesian(α),self._spherical2cartesian(β))
         # Soft threshold
         if y < 1e-10:
             y = 0
         return y
-    
+
     # Input: x array = [x1,x2,...,xn] corresponding to unit vector in cartesian coordinates
     # Output theta array = [theta1, theta2,...thetan-1] corresponding to vector in "polar coordinates"
     # One can think of theta1 as theta, theta2 as phi, and so on
