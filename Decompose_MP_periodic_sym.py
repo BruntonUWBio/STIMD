@@ -132,7 +132,6 @@ def Decompose_MP_periodic_sym(f,theta_ini,diag=0):
     N = len(x)
     c = np.floor(np.log2(N))
     N_t = 2**c
-    #global theta, theta_fit, a1_c, a1_s
     
     # Initial value of theta
     theta = theta_ini
@@ -222,4 +221,4 @@ def Decompose_MP_periodic_sym(f,theta_ini,diag=0):
     if cp < 0:
         phi += pi
     
-    return IMF,theta,phi,dtheta
+    return IMF,theta,phi,dtheta,env
